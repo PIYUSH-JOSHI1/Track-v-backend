@@ -1,0 +1,46 @@
+```
+# Core Flask dependencies for Render deployment
+Flask==2.3.3
+Flask-CORS==4.0.0
+
+# Computer Vision (headless version for server)
+opencv-python-headless==4.8.1.78
+ultralytics==8.0.196
+numpy==1.24.3
+Pillow==10.0.1
+
+# Machine Learning (CPU version for free tier)
+torch==2.0.1
+torchvision==0.15.2
+
+# Utilities
+cvzone==1.6.1
+requests==2.31.0
+Werkzeug==2.3.7
+
+# Tracking algorithm
+filterpy==1.4.5
+scikit-image==0.21.0
+scipy==1.11.3
+
+# Production server
+gunicorn==21.2.0
+
+# Environment variables
+python-dotenv==1.0.0
+defaultdict
+deque
+pygame
+threading
+json
+pickle
+datetime
+timedelta
+matplotlib
+sklearn
+warnings
+os
+csv
+pandas
+pygame>=2.5.0
+```
