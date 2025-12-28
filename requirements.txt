@@ -7,27 +7,33 @@ opencv-python-headless==4.8.1.78
 ultralytics==8.0.196
 numpy==1.24.3
 Pillow==10.0.1
+scikit-image==0.21.0
 
 # Machine Learning
 torch==2.0.1
 torchvision==0.15.2
 scipy==1.11.3
 
+# Enhanced Traffic Optimization
+scikit-learn==1.3.0
+
+# Data visualization
+matplotlib>=3.3.0
+seaborn>=0.11.0
+
 # Utilities
 cvzone==1.6.1
 requests==2.31.0
 Werkzeug==2.3.7
 
-# Cloud Storage (optional - only if using AWS S3)
-boto3==1.28.57
-
 # Tracking algorithm
 filterpy==1.4.5
+
+# Production server
+gunicorn
 
 # Environment variables
 python-dotenv==1.0.0
 
 # Monitoring (optional)
 psutil==5.9.5
-gunicorn
-
