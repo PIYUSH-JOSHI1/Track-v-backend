@@ -77,3 +77,17 @@ class LiveStreamHandler:
         if camera_index < len(self.ip_cameras):
             return cv2.VideoCapture(self.ip_cameras[camera_index])
         return cv2.VideoCapture(0)  # Default to webcam
+
+# Google Drive Configuration
+GOOGLE_DRIVE_VIDEOS = {
+    'cam1': 'https://drive.google.com/file/d/1ojHTFncpSeu5cVNC9ki1b_siYevmCtZo/view?usp=drive_link',
+    'cam2': 'https://drive.google.com/uc?export=download&id=YOUR_CAM2_FILE_ID', 
+    'cam3': 'https://drive.google.com/uc?export=download&id=YOUR_CAM3_FILE_ID',
+    'cam4': 'https://drive.google.com/uc?export=download&id=YOUR_CAM4_FILE_ID'
+}
+
+def get_video_source(camera_name, use_google_drive=True):
+    if use_google_drive and camera_name in GOOGLE_DRIVE_VIDEOS:
+        return GOOGLE_DRIVE_VIDEOS[camera_name]
+    # Fallback to demo videos
+    return demo_videos.get(camera_name, 0)
