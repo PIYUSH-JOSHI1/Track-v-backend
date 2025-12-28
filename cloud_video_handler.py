@@ -80,9 +80,9 @@ class LiveStreamHandler:
 
 # Google Drive Configuration
 GOOGLE_DRIVE_VIDEOS = {
-    'cam1': 'https://drive.google.com/file/d/1E-O-0h2CNzRwQIdoVhZjbDC0EaB43lVu/view?usp=sharing',
-    'cam2': 'https://drive.google.com/file/d/1ojHTFncpSeu5cVNC9ki1b_siYevmCtZo/view?usp=sharing', 
-    'cam3': 'https://drive.google.com/file/d/1NMqrX0z0PLWE-F7em-38URA1qpfjDMqc/view?usp=sharing',
+    'cam1': 'https://drive.google.com/file/d/1E-O-0h2CNzRwQIdoVhZjbDC0EaB43lVu',
+    'cam2': 'https://drive.google.com/file/d/1ojHTFncpSeu5cVNC9ki1b_siYevmCtZo', 
+    'cam3': 'https://drive.google.com/file/d/1NMqrX0z0PLWE-F7em-38URA1qpfjDMqc',
     'cam4': 'https://drive.google.com/uc?export=download&id=YOUR_CAM4_FILE_ID'
 }
 
@@ -91,4 +91,5 @@ def get_video_source(camera_name, use_google_drive=True):
         return GOOGLE_DRIVE_VIDEOS[camera_name]
     # Fallback to demo videos
     return demo_videos.get(camera_name, 0)
+
 
