@@ -1,0 +1,43 @@
+# Large video files (DON'T UPLOAD THESE)
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.weights
+yolov8l.pt
+yolov8m.pt
+yolov8x.pt
+
+# Keep only small model
+!yolov8n.pt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.env
+.env.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+tempCodeRunnerFile.py
+
+# Screenshots (these can be large)
+screenshots/
