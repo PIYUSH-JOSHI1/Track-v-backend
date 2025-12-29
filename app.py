@@ -285,7 +285,8 @@ def video_processing_thread(feed_id):
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop video
             continue
 
-        processed_frame, count, green_time, signal_state = detectors[feed_id].process_frame(frame)
+        detector = get_detector(feed_id)
+        processed_frame, count, green_time, signal_state = detector.process_frame(frame)
 
         data = {
             "count": count,
@@ -338,9 +339,16 @@ def health_check():
 
 def generate_frames(feed_id):
     while True:
-        frame_bytes = frame_queues[feed_id].get()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        try:
+            # Use timeout to prevent indefinite blocking
+            frame_bytes = frame_queues[feed_id].get(timeout=5)
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        except queue.Empty:
+            # Timeout occurred - stream has stalled
+            # Send a dummy frame or break to let client reconnect
+            print(f"Feed {feed_id} timeout: no frames in queue for 5 seconds")
+            break
 
 @app.route('/video_feed/<int:feed_id>')
 def video_feed(feed_id):
