@@ -28,6 +28,16 @@ class LaneMetrics:
     wait_time_avg: float
     bottleneck_severity: float
 
+class SignalPhase:
+    """Represents a traffic signal phase for 4-way junction"""
+    NORTH_SOUTH = 0  # Phase 0: North and South lanes are GREEN
+    EAST_WEST = 1    # Phase 1: East and West lanes are GREEN
+    
+    # Signal states
+    GREEN = "GREEN"
+    YELLOW = "YELLOW"
+    RED = "RED"
+
 class IntelligentTrafficOptimizer:
     def __init__(self):
         # Enhanced constants based on traffic engineering principles
@@ -46,6 +56,26 @@ class IntelligentTrafficOptimizer:
             'bike': 2.5,
             'emergency': 2.1
         }
+        
+        # ===== NEW: 4-WAY JUNCTION PHASE LOGIC =====
+        # Lane mapping for 4-way intersection
+        # Lane 0 = North, Lane 1 = East, Lane 2 = South, Lane 3 = West
+        self.LANE_PHASES = {
+            0: SignalPhase.NORTH_SOUTH,  # North lane
+            1: SignalPhase.EAST_WEST,    # East lane
+            2: SignalPhase.NORTH_SOUTH,  # South lane
+            3: SignalPhase.EAST_WEST     # West lane
+        }
+        
+        # Minimum and maximum green times
+        self.MIN_GREEN_TIME = 15  # seconds
+        self.MAX_GREEN_TIME = 60  # seconds
+        self.YELLOW_TIME = 3      # seconds
+        
+        # Current phase state
+        self.current_phase = SignalPhase.NORTH_SOUTH
+        self.phase_start_time = time.time()
+        self.phase_green_time = self.MIN_GREEN_TIME
         
         # Traffic engineering standards
         self.MIN_GREEN = 7     # Minimum green time (seconds)
@@ -68,6 +98,114 @@ class IntelligentTrafficOptimizer:
             'queue_balance': 0.2,  # Balance between lanes
             'emergency': 0.1       # Emergency vehicle priority
         }
+    
+    def get_signal_state(self, lane_id: int) -> str:
+        """
+        Determine the signal state for a specific lane based on current phase
+        
+        Args:
+            lane_id: 0=North, 1=East, 2=South, 3=West
+        
+        Returns:
+            "GREEN", "YELLOW", or "RED"
+        """
+        lane_phase = self.LANE_PHASES[lane_id]
+        elapsed_time = time.time() - self.phase_start_time
+        
+        # Check for emergency override
+        if self.current_phase == SignalPhase.NORTH_SOUTH:
+            phase_is_green = (lane_phase == SignalPhase.NORTH_SOUTH)
+        else:
+            phase_is_green = (lane_phase == SignalPhase.EAST_WEST)
+        
+        if phase_is_green:
+            if elapsed_time < self.phase_green_time:
+                return SignalPhase.GREEN
+            elif elapsed_time < self.phase_green_time + self.YELLOW_TIME:
+                return SignalPhase.YELLOW
+            else:
+                return SignalPhase.RED
+        else:
+            return SignalPhase.RED
+    
+    def get_green_time_for_lane(self, lane_id: int) -> float:
+        """Get remaining green time for a lane"""
+        state = self.get_signal_state(lane_id)
+        if state == SignalPhase.GREEN:
+            elapsed = time.time() - self.phase_start_time
+            return max(0, self.phase_green_time - elapsed)
+        return 0
+    
+    def calculate_optimal_phase_duration(self, lane_metrics: Dict[int, LaneMetrics]) -> float:
+        """
+        Calculate optimal green time for current phase based on vehicle counts
+        
+        Uses Webster's formula adapted for phase-based control
+        """
+        # Get vehicle counts for lanes in current phase
+        if self.current_phase == SignalPhase.NORTH_SOUTH:
+            phase_lanes = [0, 2]  # North and South
+        else:
+            phase_lanes = [1, 3]  # East and West
+        
+        # Calculate total saturation for phase
+        total_saturation = sum(
+            lane_metrics[lane].saturation_level 
+            for lane in phase_lanes 
+            if lane in lane_metrics
+        ) / len(phase_lanes)
+        
+        # Webster's formula for green time
+        # G = (1.5 * L + 5) / (1 - Y) where L is lost time, Y is saturation
+        lost_time = self.ALL_RED_TIME  # clearance time
+        saturation = min(total_saturation, 0.95)  # Cap at 95%
+        
+        if saturation < 0.95:
+            green_time = (1.5 * lost_time + 5) / (1 - saturation)
+        else:
+            green_time = self.MAX_GREEN
+        
+        # Constrain to min/max
+        return max(self.MIN_GREEN, min(green_time, self.MAX_GREEN))
+    
+    def update_phase(self, lane_metrics: Dict[int, LaneMetrics]) -> None:
+        """Update traffic signal phase based on vehicle density"""
+        elapsed_time = time.time() - self.phase_start_time
+        
+        # Check if it's time to switch phase
+        if elapsed_time >= self.phase_green_time + self.YELLOW_TIME + self.ALL_RED_TIME:
+            # Switch to next phase
+            if self.current_phase == SignalPhase.NORTH_SOUTH:
+                self.current_phase = SignalPhase.EAST_WEST
+            else:
+                self.current_phase = SignalPhase.NORTH_SOUTH
+            
+            # Calculate new green time for next phase
+            self.phase_green_time = self.calculate_optimal_phase_duration(lane_metrics)
+            self.phase_start_time = time.time()
+    
+    def get_all_signal_states(self, lane_metrics: Dict[int, LaneMetrics]) -> Dict[int, dict]:
+        """
+        Get signal state for all 4 lanes with timing info
+        
+        Returns:
+            {
+                0: {"state": "GREEN", "duration": 25.3, "phase": "NORTH_SOUTH"},
+                1: {"state": "RED", "duration": 0, "phase": "EAST_WEST"},
+                ...
+            }
+        """
+        self.update_phase(lane_metrics)
+        
+        signals = {}
+        for lane_id in range(4):
+            signals[lane_id] = {
+                "state": self.get_signal_state(lane_id),
+                "duration": self.get_green_time_for_lane(lane_id),
+                "phase": "NORTH_SOUTH" if self.LANE_PHASES[lane_id] == SignalPhase.NORTH_SOUTH else "EAST_WEST"
+            }
+        
+        return signals
 
     def analyze_lane_conditions(self, vehicles: List[VehicleData]) -> LaneMetrics:
         """Comprehensive lane analysis using traffic engineering principles"""
