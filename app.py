@@ -13,7 +13,7 @@ import os
 import tempfile
 import requests
 from werkzeug.utils import secure_filename
-from intelligent_traffic_optimizer import IntelligentTrafficOptimizer, VehicleData, LaneMetrics
+from intelligent_traffic_optimizer import IntelligentTrafficOptimizer, VehicleData, LaneMetrics, SignalPhase
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for frontend communication
@@ -25,6 +25,9 @@ from cloud_video_handler import CloudVideoHandler, PublicVideoHandler, LiveStrea
 frame_queues = [queue.Queue(maxsize=10) for _ in range(4)]
 data_queues = [queue.Queue(maxsize=1) for _ in range(4)]
 
+# Global optimizer instance (shared across all detectors for phase management)
+global_optimizer = None
+
 class VehicleDetector:
     def __init__(self):
         try:
@@ -33,7 +36,7 @@ class VehicleDetector:
             self.tracker = Sort(max_age=10, min_hits=1, iou_threshold=0.1)
             self.total_count = []
             
-            # Initialize intelligent optimizer
+            # Initialize intelligent optimizer (will be overridden by global optimizer)
             self.optimizer = IntelligentTrafficOptimizer()
             print("VehicleDetector initialized successfully")
         except Exception as e:
@@ -43,15 +46,16 @@ class VehicleDetector:
             self.tracker = None
             self.total_count = []
             self.optimizer = None
+        
         self.vehicles_data = []  # Store enhanced vehicle data
         self.bottleneck_strategies = {}
-
-        # Enhanced constants for real-world traffic
+        self.lane_id = 0  # Will be set per detector instance
+        
+        # Traffic engineering standards
         self.MAX_SIGNAL_TIME = 120
-        self.MIN_SIGNAL_TIME = 7      # Traffic engineering standard
-        self.MAX_TRAFFIC = 50
-        self.YELLOW_TIME = 4          # Standard yellow time
-        self.ALL_RED_TIME = 2         # Clearance time
+        self.MIN_SIGNAL_TIME = 7
+        self.YELLOW_TIME = 3
+        self.ALL_RED_TIME = 2
         
         # Real-world vehicle classification
         self.class_names = ["person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train", "truck"]
@@ -69,12 +73,6 @@ class VehicleDetector:
         # Detection lines (will be initialized with frame dimensions)
         self.limit_lines = None
         self.vehicle_counts_history = []
-
-        # Enhanced traffic signal state
-        self.signal_state = "GREEN"
-        self.signal_start_time = time.time()
-        self.current_green_time = 30
-        self.vehicles_passed = 0
         
         # Performance tracking
         self.last_optimization_time = time.time()
@@ -90,87 +88,46 @@ class VehicleDetector:
             [int(width * 0.2), int(y2), int(width * 0.8), int(y2)]
         ]
 
-    def calculate_green_time(self, vehicle_count, vehicle_types=None, queue_length=0):
-        """Enhanced green time calculation using traffic engineering principles"""
+    def get_signal_state(self):
+        """Get signal state from global optimizer based on phase logic"""
+        global global_optimizer
+        if global_optimizer is None:
+            return "GREEN"  # Fallback if optimizer not available
+        
+        return global_optimizer.get_signal_state(self.lane_id)
+    
+    def get_green_time(self):
+        """Get remaining green time from global optimizer"""
+        global global_optimizer
+        if global_optimizer is None:
+            return 30
+        
+        return global_optimizer.get_green_time_for_lane(self.lane_id)
+
+    def calculate_lane_metrics(self, vehicle_count, vehicle_types=None):
+        """Calculate lane metrics for this detector's lane"""
         
         if not vehicle_types:
             vehicle_types = ['car'] * vehicle_count
-            
+        
         # Create vehicle data for optimization
         vehicles = []
         for i, v_type in enumerate(vehicle_types[:vehicle_count]):
             vehicle = VehicleData(
                 vehicle_id=i,
                 vehicle_type=self.vehicle_type_map.get(v_type, 'car'),
-                position=(0, 0),  # Would be actual position in real implementation
-                speed=0,  # Would be calculated from tracking
+                position=(0, 0),
+                speed=0,
                 queue_position=i,
-                wait_time=0,  # Would be actual wait time
+                wait_time=0,
                 priority_level=2 if v_type == 'emergency' else 0
             )
             vehicles.append(vehicle)
         
-        # Analyze lane conditions
+        # Analyze lane conditions using the optimizer
         lane_metrics = self.optimizer.analyze_lane_conditions(vehicles)
         
-        # Detect bottlenecks
-        bottlenecks = self.optimizer.detect_bottleneck_situations({'current_lane': lane_metrics})
-        
-        # Calculate optimal green time
-        optimal_green = self.optimizer.calculate_optimal_green_time(
-            lane_metrics, [], bottlenecks, 
-            emergency_present=any(v.vehicle_type == 'emergency' for v in vehicles)
-        )
-        
-        # Store bottleneck strategies for reporting
-        if bottlenecks:
-            self.bottleneck_strategies = self.optimizer.bottleneck_mitigation_strategy(
-                bottlenecks, {'current_lane': lane_metrics}
-            )
-        
-        return optimal_green
-
-    def update_signal_state(self):
-        """Enhanced signal state management with bottleneck handling"""
-        current_time = time.time()
-        elapsed_time = current_time - self.signal_start_time
-
-        # Emergency vehicle detection and override
-        emergency_detected = any(v.priority_level == 2 for v in self.vehicles_data)
-        
-        if emergency_detected and self.signal_state != "GREEN":
-            self.signal_state = "GREEN"
-            self.signal_start_time = current_time
-            self.current_green_time = 15  # Emergency clearance time
-            return
-
-        if self.signal_state == "GREEN":
-            # Check if we need to extend green time for bottleneck clearance
-            if self.bottleneck_strategies.get('current_lane') in ['EMERGENCY_CYCLE_EXTENSION', 'INCREASE_GREEN_TIME']:
-                extension = min(30, self.MAX_SIGNAL_TIME - self.current_green_time)
-                self.current_green_time += extension
-                self.bottleneck_strategies.clear()  # Clear after applying
-            
-            if self.vehicles_passed >= 2 and elapsed_time >= self.current_green_time:
-                self.signal_state = "YELLOW"
-                self.signal_start_time = current_time
-                
-        elif self.signal_state == "YELLOW":
-            if elapsed_time >= self.YELLOW_TIME:
-                self.signal_state = "RED"
-                self.signal_start_time = current_time
-                
-        elif self.signal_state == "RED":
-            if elapsed_time >= self.ALL_RED_TIME:
-                self.signal_state = "GREEN"
-                self.signal_start_time = current_time
-                self.vehicles_passed = 0
-                
-                # Enhanced green time calculation with current vehicle data
-                vehicle_types = [v.vehicle_type for v in self.vehicles_data[-10:]]  # Last 10 vehicles
-                self.current_green_time = self.calculate_green_time(
-                    len(self.total_count), vehicle_types
-                )
+        return lane_metrics
 
     def process_frame(self, frame):
         if self.limit_lines is None:
@@ -219,38 +176,49 @@ class VehicleDetector:
                     self.total_count.append(id)
                     cv2.line(frame, (limit[0], limit[1]), (limit[2], limit[3]),
                              (12, 202, 245), 3)
-                    if self.signal_state == "GREEN":
-                        self.vehicles_passed += 1
 
-        self.update_signal_state()
+        # Get signal state from global phase-based optimizer
+        signal_state = self.get_signal_state()
+        green_time = self.get_green_time()
 
         # Display signal state and other information
-        signal_color = (0, 255, 0) if self.signal_state == "GREEN" else (0, 255, 255) if self.signal_state == "YELLOW" else (0, 0, 255)
+        signal_color = (0, 255, 0) if signal_state == "GREEN" else (0, 255, 255) if signal_state == "YELLOW" else (0, 0, 255)
         cv2.rectangle(frame, (20, 20), (200, 100), signal_color, -1)
-        cvzone.putTextRect(frame, f'Signal: {self.signal_state}', (30, 40),
+        cvzone.putTextRect(frame, f'Signal: {signal_state}', (30, 40),
                            scale=1, thickness=2, offset=5,
                            colorR=signal_color, colorT=(0, 0, 0))
         cvzone.putTextRect(frame, f'Count: {len(self.total_count)}', (30, 70),
                            scale=1, thickness=2, offset=5,
                            colorR=signal_color, colorT=(0, 0, 0))
         
-        if self.signal_state == "GREEN":
-            cvzone.putTextRect(frame, f'Green Time: {self.current_green_time}s', (30, 100),
+        if signal_state == "GREEN":
+            cvzone.putTextRect(frame, f'Green Time: {green_time:.1f}s', (30, 100),
                                scale=1, thickness=2, offset=5,
                                colorR=signal_color, colorT=(0, 0, 0))
 
-        return frame, len(self.total_count), self.current_green_time, self.signal_state
+        return frame, len(self.total_count), green_time, signal_state
 
 # Create detector instances for each feed (lazy initialization)
 detectors = [None for _ in range(4)]
 
 def get_detector(feed_id):
     """Lazy initialization of detector for specific feed"""
-    global detectors
+    global detectors, global_optimizer
     if detectors[feed_id] is None:
         print(f"Initializing detector for feed {feed_id}...")
-        detectors[feed_id] = VehicleDetector()
+        detector = VehicleDetector()
+        detector.lane_id = feed_id  # Set lane ID for phase-based signal management
+        detector.optimizer = global_optimizer  # Use shared optimizer
+        detectors[feed_id] = detector
     return detectors[feed_id]
+
+def initialize_global_optimizer():
+    """Initialize the global optimizer for 4-way junction phase management"""
+    global global_optimizer
+    if global_optimizer is None:
+        print("Initializing global phase-based optimizer...")
+        global_optimizer = IntelligentTrafficOptimizer()
+    return global_optimizer
 
 # Video source handlers (lazy initialization)
 cloud_handler = None
@@ -383,12 +351,32 @@ def video_feed(feed_id):
 
 @app.route('/get_data/<int:feed_id>')
 def get_data(feed_id):
+    """Get real-time traffic data for a specific lane"""
     if 0 <= feed_id < 4:
         try:
+            # Initialize global optimizer if needed
+            initialize_global_optimizer()
+            
             data = data_queues[feed_id].get_nowait()
-            return jsonify(data)
+            
+            # Add phase information from global optimizer
+            lane_phase = "NORTH_SOUTH" if feed_id in [0, 2] else "EAST_WEST"
+            
+            return jsonify({
+                **data,
+                "lane_id": feed_id,
+                "lane_name": ["North", "East", "South", "West"][feed_id],
+                "current_phase": lane_phase,
+                "phase_info": "Opposite lanes GREEN" if data["signal_state"] == "RED" else "This lane GREEN"
+            })
         except queue.Empty:
-            return jsonify({"count": 0, "green_time": 30, "signal_state": "GREEN"})
+            return jsonify({
+                "count": 0, 
+                "green_time": 30, 
+                "signal_state": "GREEN",
+                "lane_id": feed_id,
+                "lane_name": ["North", "East", "South", "West"][feed_id]
+            })
     return jsonify({"error": "Invalid feed ID"}), 404
 
 @app.route('/set_video_source', methods=['POST'])
@@ -428,6 +416,57 @@ def upload_video():
         current_video_sources[int(feed_id)] = file_path
         
         return jsonify({"message": "Video uploaded successfully", "file_path": file_path})
+
+@app.route('/get_all_signal_states')
+def get_all_signal_states():
+    """Get signal state for all 4 lanes (4-way junction phase control)"""
+    global global_optimizer
+    
+    # Initialize optimizer if needed
+    initialize_global_optimizer()
+    
+    # Collect lane metrics from all detectors
+    lane_metrics_dict = {}
+    for lane_id in range(4):
+        detector = get_detector(lane_id)
+        try:
+            data = data_queues[lane_id].get_nowait()
+        except queue.Empty:
+            data = {"count": 0, "green_time": 30, "signal_state": "GREEN"}
+        
+        # Create lane metrics (simplified for phase management)
+        lane_metrics_dict[lane_id] = LaneMetrics(
+            vehicle_count=data.get("count", 0),
+            queue_length=data.get("count", 0) * 5,  # Assume 5m per vehicle
+            average_speed=0,
+            saturation_level=min(data.get("count", 0) / 30.0, 1.0),
+            discharge_rate=2.1,
+            arrival_rate=0,
+            wait_time_avg=0,
+            bottleneck_severity=0
+        )
+    
+    # Get all signal states from global optimizer
+    signal_states = global_optimizer.get_all_signal_states(lane_metrics_dict)
+    
+    # Format response with lane information
+    response = {
+        "timestamp": time.time(),
+        "current_phase": "NORTH_SOUTH" if global_optimizer.current_phase == "NORTH_SOUTH" else "EAST_WEST",
+        "lanes": {}
+    }
+    
+    for lane_id in range(4):
+        lane_names = ["North", "East", "South", "West"]
+        response["lanes"][lane_id] = {
+            "lane_name": lane_names[lane_id],
+            "signal_state": signal_states[lane_id]["state"],
+            "remaining_green_time": signal_states[lane_id]["duration"],
+            "phase": signal_states[lane_id]["phase"],
+            "vehicle_count": lane_metrics_dict[lane_id].vehicle_count
+        }
+    
+    return jsonify(response)
 
 @app.route('/get_bottleneck_analysis/<int:feed_id>')
 def get_bottleneck_analysis(feed_id):
@@ -497,6 +536,9 @@ def optimize_signal(feed_id):
     return jsonify({"error": "Invalid feed ID"}), 404
 
 if __name__ == '__main__':
+    # Initialize global optimizer for 4-way junction phase management
+    initialize_global_optimizer()
+    
     # Start video processing threads for each feed
     for i in range(4):
         threading.Thread(target=video_processing_thread, args=(i,), daemon=True).start()
@@ -512,11 +554,15 @@ def initialize_threads():
     """Initialize video processing threads for production"""
     try:
         print("Starting video processing threads...")
+        # Initialize global optimizer first
+        initialize_global_optimizer()
+        
         for i in range(4):
             thread = threading.Thread(target=video_processing_thread, args=(i,), daemon=True)
             thread.start()
             print(f"Started thread for camera {i+1}")
         print("All video threads started successfully")
+        print("4-way junction phase-based signal control ACTIVE")
     except Exception as e:
         print(f"Error starting threads: {e}")
         # Continue without threads for basic API functionality
@@ -528,5 +574,6 @@ try:
     print("Flask app module loaded successfully")
     print(f"Environment: {'production' if os.environ.get('RENDER') else 'development'}")
     print(f"Port: {os.environ.get('PORT', 5000)}")
+    print("Signal Control: 4-Way Junction Phase-Based Management")
 except Exception as e:
     print(f"Error in production initialization: {e}")
