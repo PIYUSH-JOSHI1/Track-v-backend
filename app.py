@@ -15,6 +15,7 @@ import requests
 from werkzeug.utils import secure_filename
 from intelligent_traffic_optimizer import IntelligentTrafficOptimizer, VehicleData, LaneMetrics, SignalPhase
 
+
 app = Flask(__name__)
 CORS(app, resources={
     r"/video_feed/*": {"origins": "*", "methods": ["GET", "HEAD", "OPTIONS"]},
@@ -722,3 +723,4 @@ try:
     print("Signal Control: 4-Way Junction Phase-Based Management")
 except Exception as e:
     print(f"Error in production initialization: {e}")
+
