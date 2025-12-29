@@ -240,7 +240,13 @@ current_video_sources = [None, None, None, None]
 video_source_type = "demo"  # "demo", "cloud", "live", "upload"
 
 def video_processing_thread(feed_id):
-    global current_video_sources
+    global current_video_sources, public_handler, cloud_handler, live_handler
+    
+    # Initialize handlers on first run
+    try:
+        get_video_handlers()
+    except Exception as e:
+        print(f"Warning: Could not initialize video handlers: {e}")
     
     while True:
         cap = None
@@ -248,7 +254,11 @@ def video_processing_thread(feed_id):
         # Initialize video source based on type
         if video_source_type == "demo":
             # Use sample/demo videos
-            cap = public_handler.get_sample_video_stream(feed_id % len(public_handler.sample_videos))
+            try:
+                cap = public_handler.get_sample_video_stream(feed_id % len(public_handler.sample_videos))
+            except Exception as e:
+                print(f"Error loading demo video for feed {feed_id}: {e}")
+                cap = None
         elif video_source_type == "cloud" and current_video_sources[feed_id]:
             # Use cloud storage videos
             cap = cloud_handler.get_video_stream_from_s3(current_video_sources[feed_id])
@@ -287,6 +297,12 @@ def video_processing_thread(feed_id):
 
         detector = get_detector(feed_id)
         processed_frame, count, green_time, signal_state = detector.process_frame(frame)
+        
+        # Update global optimizer phases to rotate traffic signals properly
+        try:
+            global_optimizer.update_phase({})
+        except Exception as e:
+            print(f"Error updating phase: {e}")
 
         data = {
             "count": count,
@@ -335,7 +351,21 @@ def index():
 
 @app.route('/health')
 def health_check():
-    return jsonify({"status": "healthy", "timestamp": time.time()})
+    """Detailed health check with thread and queue status"""
+    queue_sizes = [frame_queues[i].qsize() for i in range(4)]
+    return jsonify({
+        "status": "healthy",
+        "timestamp": time.time(),
+        "threads_active": threading.active_count(),
+        "frame_queue_sizes": queue_sizes,
+        "detectors_initialized": [detectors[i] is not None for i in range(4)],
+        "video_source_type": video_source_type,
+        "handlers_initialized": {
+            "cloud": cloud_handler is not None,
+            "public": public_handler is not None,
+            "live": live_handler is not None
+        }
+    })
 
 def generate_frames(feed_id):
     while True:
