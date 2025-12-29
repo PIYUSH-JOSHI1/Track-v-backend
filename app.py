@@ -16,14 +16,21 @@ from werkzeug.utils import secure_filename
 from intelligent_traffic_optimizer import IntelligentTrafficOptimizer, VehicleData, LaneMetrics, SignalPhase
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for frontend communication
+CORS(app, resources={
+    r"/video_feed/*": {"origins": "*", "methods": ["GET", "HEAD", "OPTIONS"]},
+    r"/get_data/*": {"origins": "*"},
+    r"/*": {"origins": "*"}
+})  # Enable CORS with specific headers for video streaming
 
 # Import cloud video handlers
-from cloud_video_handler import CloudVideoHandler, PublicVideoHandler, LiveStreamHandler
+from cloud_video_handler import CloudVideoHandler, PublicVideoHandler, LiveStreamHandler, YouTubeVideoHandler
 
-# Create separate queues for each video feed
-frame_queues = [queue.Queue(maxsize=10) for _ in range(4)]
-data_queues = [queue.Queue(maxsize=1) for _ in range(4)]
+# Video quality settings
+VIDEO_QUALITY = {
+    'resolution': (480, 360),  # Width x Height - 480p for bandwidth efficiency
+    'jpeg_quality': 70,  # 0-100, lower = smaller file
+    'fps_limit': 15  # Limit FPS to reduce bandwidth
+}
 
 # Global optimizer instance (shared across all detectors for phase management)
 global_optimizer = None
@@ -224,23 +231,65 @@ def initialize_global_optimizer():
 cloud_handler = None
 public_handler = None  
 live_handler = None
+youtube_handler = None
 
 def get_video_handlers():
     """Lazy initialization of video handlers"""
-    global cloud_handler, public_handler, live_handler
+    global cloud_handler, public_handler, live_handler, youtube_handler
     if cloud_handler is None:
         print("Initializing video handlers...")
         cloud_handler = CloudVideoHandler()
         public_handler = PublicVideoHandler()
         live_handler = LiveStreamHandler()
-    return cloud_handler, public_handler, live_handler
+        youtube_handler = YouTubeVideoHandler()
+    return cloud_handler, public_handler, live_handler, youtube_handler
 
 # Global variables for video sources
 current_video_sources = [None, None, None, None]
-video_source_type = "demo"  # "demo", "cloud", "live", "upload"
+video_source_type = "demo"  # "demo", "cloud", "live", "upload", "youtube"
+last_frame_time = [0] * 4  # Track frame timing for FPS limiting
+
+def compress_frame(frame, target_resolution=None, jpeg_quality=70):
+    """
+    Compress frame for efficient streaming
+    
+    Args:
+        frame: OpenCV frame
+        target_resolution: (width, height) tuple, defaults to VIDEO_QUALITY
+        jpeg_quality: JPEG quality 0-100
+    
+    Returns:
+        JPEG bytes
+    """
+    if target_resolution is None:
+        target_resolution = VIDEO_QUALITY['resolution']
+    
+    # Resize frame
+    height, width = frame.shape[:2]
+    if (width, height) != target_resolution:
+        frame = cv2.resize(frame, target_resolution, interpolation=cv2.INTER_LINEAR)
+    
+    # Encode to JPEG
+    ret, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+    if ret:
+        return buffer.tobytes()
+    return None
+
+def should_process_frame(feed_id, fps_limit=None):
+    """Check if enough time has passed to process next frame"""
+    if fps_limit is None:
+        fps_limit = VIDEO_QUALITY['fps_limit']
+    
+    current_time = time.time()
+    min_interval = 1.0 / fps_limit
+    
+    if current_time - last_frame_time[feed_id] >= min_interval:
+        last_frame_time[feed_id] = current_time
+        return True
+    return False
 
 def video_processing_thread(feed_id):
-    global current_video_sources, public_handler, cloud_handler, live_handler
+    global current_video_sources, public_handler, cloud_handler, live_handler, youtube_handler
     
     # Initialize handlers on first run
     try:
@@ -251,85 +300,111 @@ def video_processing_thread(feed_id):
     while True:
         cap = None
         
-        # Initialize video source based on type
-        if video_source_type == "demo":
-            # Use sample/demo videos
-            try:
-                cap = public_handler.get_sample_video_stream(feed_id % len(public_handler.sample_videos))
-            except Exception as e:
-                print(f"Error loading demo video for feed {feed_id}: {e}")
-                cap = None
-        elif video_source_type == "cloud" and current_video_sources[feed_id]:
-            # Use cloud storage videos
-            cap = cloud_handler.get_video_stream_from_s3(current_video_sources[feed_id])
-        elif video_source_type == "live":
-            # Use live camera feeds
-            cap = live_handler.get_live_stream(feed_id)
-        elif video_source_type == "upload" and current_video_sources[feed_id]:
-            # Use uploaded videos
-            cap = cv2.VideoCapture(current_video_sources[feed_id])
-        
-        if cap is None:
-            # Fallback to webcam or dummy frame
-            cap = cv2.VideoCapture(0)
-            if not cap.isOpened():
-                # Create dummy frame if no video source available
-                dummy_frame = np.zeros((480, 640, 3), dtype=np.uint8)
-                cv2.putText(dummy_frame, f"Feed {feed_id+1} - No Source", 
-                           (50, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-                
-                ret, buffer = cv2.imencode('.jpg', dummy_frame)
-                frame_bytes = buffer.tobytes()
-                
+        try:
+            # Initialize video source based on type
+            if video_source_type == "demo":
+                # Use sample/demo videos
                 try:
-                    frame_queues[feed_id].put(frame_bytes, block=False)
-                except queue.Full:
-                    pass
+                    cap = public_handler.get_sample_video_stream(feed_id % len(public_handler.sample_videos))
+                except Exception as e:
+                    print(f"Error loading demo video for feed {feed_id}: {e}")
+                    cap = None
+            elif video_source_type == "youtube" and current_video_sources[feed_id]:
+                # Load from YouTube using yt-dlp
+                try:
+                    cap = youtube_handler.get_video_stream(current_video_sources[feed_id], resolution='480p')
+                except Exception as e:
+                    print(f"Error loading YouTube video for feed {feed_id}: {e}")
+                    cap = None
+            elif video_source_type == "cloud" and current_video_sources[feed_id]:
+                # Use cloud storage videos
+                cap = cloud_handler.get_video_stream_from_s3(current_video_sources[feed_id])
+            elif video_source_type == "live":
+                # Use live camera feeds
+                cap = live_handler.get_live_stream(feed_id)
+            elif video_source_type == "upload" and current_video_sources[feed_id]:
+                # Use uploaded videos
+                cap = cv2.VideoCapture(current_video_sources[feed_id])
+            
+            if cap is None:
+                # Fallback to webcam or dummy frame
+                cap = cv2.VideoCapture(0)
+                if not cap.isOpened():
+                    # Create dummy frame if no video source available
+                    dummy_frame = np.zeros((360, 480, 3), dtype=np.uint8)
+                    cv2.putText(dummy_frame, f"Feed {feed_id+1} - No Source", 
+                               (50, 180), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    
+                    frame_bytes = compress_frame(dummy_frame)
+                    if frame_bytes:
+                        try:
+                            frame_queues[feed_id].put(frame_bytes, block=False)
+                        except queue.Full:
+                            pass
+                    
+                    time.sleep(0.1)
+                    continue
+
+            # Set buffer size to prevent lag
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            
+            while True:
+                success, frame = cap.read()
+                if not success:
+                    if hasattr(cap, 'set'):
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop video
+                    break
+
+                # Limit FPS to reduce bandwidth
+                if not should_process_frame(feed_id):
+                    continue
+
+                # Resize and compress for transmission
+                frame = cv2.resize(frame, VIDEO_QUALITY['resolution'], interpolation=cv2.INTER_LINEAR)
                 
-                time.sleep(0.1)
-                continue
+                detector = get_detector(feed_id)
+                processed_frame, count, green_time, signal_state = detector.process_frame(frame)
+                
+                # Update global optimizer phases to rotate traffic signals properly
+                try:
+                    global_optimizer.update_phase({})
+                except Exception as e:
+                    print(f"Error updating phase: {e}")
 
-        success, frame = cap.read()
-        if not success:
-            if hasattr(cap, 'set'):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop video
-            continue
+                data = {
+                    "count": count,
+                    "green_time": green_time,
+                    "signal_state": signal_state
+                }
 
-        detector = get_detector(feed_id)
-        processed_frame, count, green_time, signal_state = detector.process_frame(frame)
+                try:
+                    data_queues[feed_id].put(data, block=False)
+                except queue.Full:
+                    try:
+                        data_queues[feed_id].get_nowait()
+                        data_queues[feed_id].put(data, block=False)
+                    except queue.Empty:
+                        pass
+
+                # Compress frame for streaming
+                frame_bytes = compress_frame(processed_frame, jpeg_quality=VIDEO_QUALITY['jpeg_quality'])
+                if frame_bytes:
+                    try:
+                        frame_queues[feed_id].put(frame_bytes, block=False)
+                    except queue.Full:
+                        try:
+                            frame_queues[feed_id].get_nowait()
+                            frame_queues[feed_id].put(frame_bytes, block=False)
+                        except queue.Empty:
+                            pass
         
-        # Update global optimizer phases to rotate traffic signals properly
-        try:
-            global_optimizer.update_phase({})
         except Exception as e:
-            print(f"Error updating phase: {e}")
-
-        data = {
-            "count": count,
-            "green_time": green_time,
-            "signal_state": signal_state
-        }
-
-        try:
-            data_queues[feed_id].put(data, block=False)
-        except queue.Full:
-            try:
-                data_queues[feed_id].get_nowait()
-                data_queues[feed_id].put(data, block=False)
-            except queue.Empty:
-                pass
-
-        ret, buffer = cv2.imencode('.jpg', processed_frame)
-        frame_bytes = buffer.tobytes()
-
-        try:
-            frame_queues[feed_id].put(frame_bytes, block=False)
-        except queue.Full:
-            try:
-                frame_queues[feed_id].get_nowait()
-                frame_queues[feed_id].put(frame_bytes, block=False)
-            except queue.Empty:
-                pass
+            print(f"Error in video processing thread {feed_id}: {e}")
+            time.sleep(1)
+            continue
+        finally:
+            if cap:
+                cap.release()
 
 @app.route('/')
 def index():
@@ -429,6 +504,38 @@ def set_video_source():
     current_video_sources = sources + [None] * (4 - len(sources))
     
     return jsonify({"message": f"Video source set to {source_type}", "sources": current_video_sources})
+
+@app.route('/set_youtube_feed', methods=['POST'])
+def set_youtube_feed():
+    """Set a YouTube video URL for a specific feed"""
+    global video_source_type, current_video_sources
+    
+    data = request.get_json()
+    feed_id = data.get('feed_id', 0)
+    youtube_url = data.get('url', '')
+    
+    if not youtube_url:
+        return jsonify({"error": "YouTube URL required"}), 400
+    
+    if not (0 <= feed_id < 4):
+        return jsonify({"error": "Invalid feed ID"}), 400
+    
+    try:
+        # Validate it's a YouTube URL
+        if 'youtube.com' not in youtube_url and 'youtu.be' not in youtube_url:
+            return jsonify({"error": "Invalid YouTube URL"}), 400
+        
+        video_source_type = "youtube"
+        current_video_sources[feed_id] = youtube_url
+        
+        return jsonify({
+            "message": f"YouTube video set for feed {feed_id}",
+            "feed_id": feed_id,
+            "url": youtube_url,
+            "status": "active"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/upload_video', methods=['POST'])
 def upload_video():
